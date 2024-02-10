@@ -1,0 +1,813 @@
+                        * edited by Greg Simmons from Mot manual Aug 2019
+O  0000   01 01 01             NAM    JBUG
+                        * REV 1.8  9-6-76
+                        *
+                        *A MONITOR PROGRAM WITH AN INTERNAL KEYBOARD/DISPLAY
+                        *
+                        * ASSEMBLED ON THE EXORCISER FOR MOTOROLA
+                        * INC. -- FALL OF 76
+                        *
+                        * COPYRIGHT 1976 BY MOTOROLA SPG
+                        *
+O  0003   01 01 01             OPT    S,O      SYMBOL TABLE;OBJECT TAPE
+                        *
+                        *
+                        *
+                        **COMMAND SYMBOLS
+                        ****P - PUNCH DESIGNATED MEMORY TO AUDIO CASSETTE
+                        ****L - LOAD AUDIO CASSETTE TO MEMORY
+                        ****N - TRACE ONE INSTRUCTION
+                        *        USES NMI INTERUPT
+                        *        N CLEARS ANY BRKPTS IF SET
+                        *        SINCE TRACE USES HARDWARE IT CAN
+                        *        TRACE THRU ROM AND INTERRUPTS
+                        ****V - SET AND CLEAR BREAKPOINTS (FIVE ALLOWED)
+                        *        IF THE ADDRESS NOT= ZERO THEN A BRKPT
+                        *        IS INSERTED AT THE ADDRESS. IF THE
+                        *        ADDRESS = 0 THEN ALL 5 BRKPTS ARE CLEARED.
+                        ****M - MEMORY EXAMINE AND CHANGE
+                        ****E - ESCAPE (ABORT)
+                        ****R - REGISTER DISPLAY
+                        *        ORDER OF DISPLAY IS: PC,X,A,B,CC,SP
+                        ****G - GO TO USERS PROGRAM/ADVANCE/PROCEED.
+                        *        IF ADDRESS NOT = 0 SET USER'S PC TO
+                        *        NEW VALUE AND GO TO USER'S PROGRAM.
+                        *        IF ADDRESS=0 THEN RETURN TO PROGRAM AT
+                        *        PREVIOUS LOCATION (PROCEED MODE).
+                        *        IF IN R,G MEANS ADVANCE TO NEXT REGISTER.
+                        *        IF IN M,G MEANS ADVANCE TO NEXT MEMORY.
+                        *
+                        *
+                        ****************************************************
+                        **CONTROL STACK AT $A078**
+                        ** RAM STARTS AT $A000
+                        ** ROM IS AT LOCATIONS $E000-$E3FF
+                        ** ACIA IS AT $8008-8009
+                        ** PIA IS AT $8020-8023
+                        ****************************************************
+                        ****************************************************
+                        *
+                        * THE RESTART ENTRY IS AT LABEL 'RESTAR' AT
+                        * LOCATION $E08D.
+                        *
+                        ****************************************************
+                               PAGE
+   e000                        ORG    $E000
+                        *
+                        ****ROUTINE TO CALCULATE OFFSETS****
+                        ***SETUP STACK AS FOLLOWS:
+                        *   B-REG (SP+2) = HIGH BYTE OF DESTINATION ADDR
+                        *   A-REG (SP+3) = LOW BYTE OF DEST ADDR
+                        *   X-REG (SP+4,5) = ADDR OF OPCODE OF BRANCH
+                        *                    INSTRUCTION
+   e000   08                   INX
+   e001   ff a0 1e             STX    BPADR    ;STORE OFFSET ADDR
+   e004   08                   INX
+   e005   ff a0 0a             STX    TEMP1    ;ADDR OF NEXT OP CODE
+   e008   b0 a0 0b             SUBA   TEMP1+1  ;LOW BYTES
+   e00b   f2 a0 0a             SBCB   TEMP1    ;HIGH BYTES
+   e00e   fe a0 1e             LDX    BPADR    ;GET OFFSET ADDR
+   e011   a7 00                STAA   0,X      ;CHANGE OFFSET
+   e013   3f                   SWI             ;STACK AND DISPLAY
+                        ***REGISTERS ON STACK CONTAIN THE FOLLOWING:
+                        *****INDEX - ADDR OF OFFSET BYTE THAT WAS CHANGED
+                        *****A ACCM - VALUE OF OFFSET
+                        *****B ACCM - 00 - FORWARD BRANCH WITHIN RANGE
+                        *****         FF - REVERSE BRANCH WITHIN RANGE
+                        *****         -ANY OTHER VALUE IMPLIES A BRANCH
+                        *****          OUT OF RANGE.
+                        ****************************************************
+                        *
+                        * HERE ON IRQ INTERUPT
+                        *
+                        ****IRQ INTERRUPT SERVICE****
+   e014   fe a0 00      IO     LDX    IOV      ;PICK UP PSEUDO VECTOR
+   e017   6e 00                JMP    0,X      ;GO TO IT
+                        *
+                        * HERE ON NMI INTERUPT
+                        *    MAY BE TRACE OR A TRACE TO PROCEED
+                        *    OR A KEYBOARD INTERUPT.
+                        *
+                        ****NMI INTERRUPT SERVICE****
+   e019   bf a0 08      NONMSK STS    SP       ;SAVE USER'S STACK PTR
+   e01c   8d 66                BSR    DISNMI   ;DISABLE NMI INTERUPTS
+   e01e   7d a0 18             TST    NFLAG    ;TRACE MODE?
+   e021   27 0a                BEQ    NONMK1   ;NO
+   e023   7f a0 18      TNM1   CLR    NFLAG    ;RESET FLAG
+   e026   8d 3b                BSR    GETXB    ;GET TAB ADDR AND VFLAG
+   e028   27 2e                BEQ    TDISP    ;NO BP, DISPLAY REGS
+   e02a   7e e2 36             JMP    TGB      ;BP ACTIVE
+                        * MUST BE KEYBOARD INTERUPT
+   e02d   fe a0 06      NONMK1 LDX    NIO
+   e030   6e 00                JMP    0,X      ;DECODE KEYBOARD
+                        *
+                        * HERE ON SOFTWARE INTERUPT
+                        *    USUALLY A BREAKPOINT
+                        *
+                        ****SWI SERVICE ROUTINE****
+   e032   bf a0 08      SWIR   STS    SP       ;SAVE USER'S SP
+   e035   8d 4d                BSR    DISNMI   ;DISABLE NMI INTERRUPTS
+   e037   30                   TSX             ;DECR PC BY 1
+   e038   6d 06                TST    6,X      ;BACKUP PC ON STACK
+   e03a   26 02                BNE    *+4
+   e03c   6a 05                DEC    5,X
+   e03e   6a 06                DEC    6,X
+   e040   8d 21                BSR    GETXB    ;GET TAB ADDR AND VFLAG
+   e042   27 14                BEQ    TDISP    ;NO BRKPTS, GO DISPLAY REGS
+                        *
+                        * REMOVE BRKPTS WHILE WE ARE IN JBUG. THEY
+                        * WILL BE RESTORED ON A GO OR PROCEED
+                        *
+                        ******HERE TO REMOVE BREAKPOINTS******
+   e044   ff a0 1e      TZONK  STX    BPADR    ;SAVE IN TEMP
+   e047   a6 02                LDAA   2,X      ;GET OP CODE TO RESTORE
+                        * SAFEGUARD AGAINST MULTI DEFINED BRKPTS
+                        *     
+   e049   81 3f                CMPA   #$3F
+   e04b   27 07                BEQ    GENA     ;BRANCH IF MULTI-DEF
+   e04d   ee 00                LDX    0,X      ;GET ADDR OF BKPT
+   e04f   a7 00                STAA   0,X      ;RESTORE OP CODE
+   e051   fe a0 1e             LDX    BPADR    ;GET TABLE POSITION
+   e054   8d 08         GENA   BSR    ADD3X    ;GET NEXT POSITION AND DECB
+   e056   26 ec                BNE    TZONK    ;GO AGAIN
+   e058   bf a0 08      TDISP  STS    SP       ;SAVE USER'S STACK POINTER
+   e05b   7e e2 06             JMP    KEYDCE   ;GO DISPLAY REGS
+                        *
+                        ****SUBROUTINE TO GET NEXT TABLE ENTRY
+                        *
+   e05e   08            ADD3X  INX
+   e05f   08                   INX
+   e060   08                   INX
+   e061   5a                   DECB            ;DEC CTR
+   e062   39                   RTS             ;LET CALLED DO CTR CHECK
+                        *
+                        ****SUB TO GET TABLE ADDR IN X VFLAG IN B
+                        *
+   e063   ce a0 22      GETXB  LDX    #BPTAB   ;GET TABLE BASE ADDR
+   e066   f6 a0 1d             LDAB   VFLAG
+   e069   39                   RTS
+                        *
+                        **SUBROUTINE TO SET A BREAKPOINT (MAKE AN
+                        ****ENTRY INTO BREAKPOINT TABLE) IF ENOUGH
+                        ****SPACE EXISTS
+                        *   THE ACTUAL BRKPTS ARE PUT IN MEMORY
+                        *   ON THE 'G' COMMAND
+                        *
+   e06a   8d f7         SETBR  BSR    GETXB    ;GET TAB ADDR AND VFLAG
+   e06c   27 08                BEQ    TZOT     ;NO BKPTS, GO INSERT ONE
+   e06e   c1 05                CMPB   #$5      ;ENOUGH ROOM?
+   e070   2c 52                BGE    CLRDS    ;NO, CLEAR DISPLAY AND RTS
+                        ******GET TO FIRST FREE SPACE IN TABLE******
+   e072   8d ea         TPIG   BSR    ADD3X    ;ADD 3 TO X AND DECB
+   e074   26 fc                BNE    TPIG     ;BRANCH IF NOT DONE
+                        ******INSERT NEW BKPT IN TABLE*****
+   e076   7c a0 1d      TZOT   INC    VFLAG    ;INCR FLAG
+   e079   b6 a0 1e             LDAA   BPADR    ;INSERT IN TABLE
+   e07c   a7 00                STAA   0,X
+   e07e   b6 a0 1f             LDAA   BPADR+1
+   e081   a7 01                STAA   1,X
+   e083   39                   RTS
+                        *
+                        ****SUBROUTINE TO DISABLE NMI INTERRUPTS****
+                        *
+   e084   86 3c         DISNMI LDAA   #$3C
+   e086   b7 80 21             STAA   DISCTR   ;INTR MASKED CA1 ACTIVE LOW
+   e089   b7 80 23             STAA   SCNCTR   ;INTR MASKED CB1 ACTIVE LOW
+   e08c   39                   RTS
+                        *
+                        *
+                        ****RESTART ROUTINE****
+                        *
+                        *
+   e08d   8e a0 78      RESTAR LDS    #$A078
+   e090   bf a0 08             STS    SP       ;INITALIZE STACK POINTER
+   e093   ce e1 4e             LDX    #KEYDC   ;GO DECODE KEYBOARD
+   e096   ff a0 06             STX    NIO      ;INITALIZE NMI INTERRUPT
+                        *INITALIZE KEYBOARD/DISPLAY PIA
+   e099   86 ff                LDAA   #$FF
+   e09b   b7 80 22             STAA   SCNREG   ;PBO-PB7 OUTPUTS
+   e09e   44                   LSRA 
+   e09f   b7 80 20             STAA   DISREG   ;PA0-PA6 OUTPUTS,PA7 INPUT
+   e0a2   8d e0                BSR    DISNMI   ;DISABLE KEYBOARD/TRACE
+                        **INITALIZE ACIA**
+   e0a4   86 03                LDAA   #3
+   e0a6   b7 80 08             STAA   ACIAS    ;RESET THE ACIA
+   e0a9   7f a0 1d             CLR    VFLAG    ;INITALIZE VFLAG
+   e0ac   8d 04         INIT   BSR    CLFLG    ;CLEAR DISPLAY AND FLAGS
+   e0ae   8d 27                BSR    HDR      ;WRITE PROMPT "-"
+   e0b0   20 4c                BRA    OUTDS
+                        *
+                        ****SUBROUTINE TO CLEAR DISPLAY BUFFER AND FLAGS****
+                        *
+   e0b2   ce a0 14      CLFLG  LDX    #DIGIN4
+   e0b5   4f                   CLRA            ;CLEARS DIGIN4 AND DIGIN8
+   e0b6   a7 00         CLFLG1 STAA   0,X      ;CLEARS MFLAG AND RFLAG
+   e0b8   08                   INX             ;CLEARS NFLAG AND TEMP2
+   e0b9   8c a0 1a             CPX    #DIGIN4+6  ;END?
+   e0bc   26 f8                BNE    CLFLG1   ;NO LOOP BACK
+   e0be   ce a0 0c             LDX    #DISBUF
+   e0c1   ff a0 1a             STX    XKEYBF   ;INITALIZE XKEYBF
+   e0c4   86 7f         CLRDS  LDAA   #$7F
+   e0c6   b7 80 20             STAA   DISREG   ;BLANK DISPLAY
+   e0c9   86 11                LDAA   #17
+   e0cb   ce a0 0c             LDX    #DISBUF
+   e0ce   a7 00         CLRDS1 STAA   0,X      ;CLEAR OUT DISPLAY BUFFER
+   e0d0   08                   INX
+   e0d1   8c a0 14             CPX    #DISBUF+8  ;END?
+   e0d4   26 f8                BNE    CLRDS1
+   e0d6   39                   RTS
+                        *
+                        *SUBROUTINE TO WRITE PROMPT ON DISPLAY
+                        *
+   e0d7   86 10         HDR    LDAA   #16
+   e0d9   b7 a0 0c             STAA   DISBUF   ;OUTPUT -
+   e0dc   39                   RTS
+                        *
+                        *SUBROUTINE TO DELAY 20 MS OR X MS
+                        *   WHEN ENTERING AT DLY1 THE XREG MUST CONTAIN
+                        *   THE DESIRED DELAY CT (APX 13USEC/COUNT)
+                        *
+   e0dd   ce 06 00      DLY20  LDX    #$0600
+   e0e0   09            DLY1   DEX
+   e0e1   26 fd                BNE    DLY1
+   e0e3   39                   RTS
+                        *
+                        ****SUBROUTINE TO BUILD TWO BYTE ADDRESS FROM
+                        ******FIRST LOCATIONS OF DISBUF
+                        *   ADDRESS IS IN X-REG AND 'BPADR' ON EXIT
+                        *
+   e0e4   ce a0 0c      BLDX   LDX    #DISBUF
+   e0e7   a6 00                LDAA   0,X      ;GET FIRST BYTE
+   e0e9   48                   ASLA 
+   e0ea   48                   ASLA 
+   e0eb   48                   ASLA 
+   e0ec   48                   ASLA            ;MOVE TO HIGH NIBBLE
+   e0ed   aa 01                ORAA   1,X      ;OR WITH LOW NIBBLE
+   e0ef   a7 12                STAA   BPADR-DISBUF,X  ;STORE IN BPADR
+   e0f1   a6 02                LDAA   2,X      ;GET SECOND BYTE
+   e0f3   48                   ASLA 
+   e0f4   48                   ASLA 
+   e0f5   48                   ASLA 
+   e0f6   48                   ASLA            ;MOVE TO HIGH NIBBLE
+   e0f7   aa 03                ORAA   3,X      ;OR WITH LOW NIBBLE
+   e0f9   a7 13                STAA   BPADR+1-DISBUF,X  ;STORE IN BPADR+1
+   e0fb   ee 12                LDX    BPADR-DISBUF,X  ;ADDRESS TO XREG
+   e0fd   39                   RTS
+                        *
+                        *
+                        ****ROUTINE TO DISPLAY 6 DIGITS IN DISBUF
+                        *
+                        *
+   e0fe   ce a0 0c      OUTDS  LDX    #DISBUF  ;GET STARTING ADDRESS
+   e101   a6 00         OUTDS1 LDAA   0,X      ;GET FIRST DIGIT
+   e103   4c                   INCA 
+   e104   08                   INX
+   e105   ff a0 20             STX    XDSBUF   ;SAVE POINTER
+   e108   ce e3 c9             LDX    #DIGTBL-1
+   e10b   08            OUTDS2 INX
+   e10c   4a                   DECA            ;POINT TO PATTERN
+   e10d   26 fc                BNE    OUTDS2
+   e10f   7f 80 22             CLR    SCNREG   ;BLANK DISPLAY
+   e112   a6 00                LDAA   0,X      ;GET PATTERN
+   e114   b7 80 20             STAA   DISREG   ;SET UP SEGMENTS
+   e117   b6 a0 1c             LDAA   SCNCNT
+   e11a   b7 80 22             STAA   SCNREG   ;SELECT DIGIT
+   e11d   ce 00 4d             LDX    #$4D     ;SETUP FOR 1MS DELAY
+   e120   8d be                BSR    DLY1     ;DELAY 1 MS
+   e122   fe a0 20             LDX    XDSBUF   ;RECOVER POINTER
+   e125   8c a0 12             CPX    #DISBUF+6
+   e128   27 1f                BEQ    OUTDS3
+   e12a   74 a0 1c             LSR    SCNCNT   ;NO,MOVE TO NEXT DIGIT
+   e12d   20 d2                BRA    OUTDS1
+                        *
+                        ****SUBROUTINE TO SCAN KEYBOARD****
+                        *
+   e12f   86 ff         KEYCL  LDAA   #$FF
+   e131   ce 80 20             LDX    #DISREG
+   e134   a7 00                STAA   0,X      ;BLANK DISPLAY
+   e136   86 3f                LDAA   #$3F
+   e138   a7 02                STAA   2,X      ;ALL ROWS LOW
+   e13a   a6 02         KEYCL1 LDAA   2,X
+   e13c   6d 00                TST    0,X
+   e13e   2a 08                BPL    KEYCL2   ;KEY DOWN?
+   e140   8b 40                ADDA   #64
+   e142   a7 02                STAA   2,X      ;SELECT NEXT COLUMN
+   e144   84 c0                ANDA   #$C0
+   e146   26 f2                BNE    KEYCL1   ;LAST COLUMN SCANNED?
+   e148   39            KEYCL2 RTS             ;NO KEY FOUND
+   e149   86 20         OUTDS3 LDAA   #$20
+   e14b   b7 a0 1c             STAA   SCNCNT   ;INITALIZE SCNCNT
+                        *
+                        ****ROUTINE TO SCAN AND DECODE KEYBOARD****
+                        *
+   e14e   8d df         KEYDC  BSR    KEYCL
+   e150   27 ac                BEQ    OUTDS    ;NO KEY CLOSED
+   e152   8d 89                BSR    DLY20
+   e154   ce 80 20             LDX    #DISREG  ;RESTORE X
+   e157   86 01                LDAA   #$01     ;SETUP SCAN FOR FIRST ROW
+   e159   a7 02                STAA   2,X
+   e15b   8d dd         KEYDC1 BSR    KEYCL1   ;SCAN KEYBOARD,GET KEY
+   e15d   26 0a                BNE    KEYDC2   ;KEY FOUND
+   e15f   a6 02                LDAA   2,X      ;CLEARS NMI INTERRUPT
+   e161   81 20                CMPA   #$20
+   e163   27 99                BEQ    OUTDS    ;LAST ROW
+   e165   68 02                ASL    2,X      ;SHIFT LEFT
+   e167   20 f2                BRA    KEYDC1
+   e169   5f            KEYDC2 CLRB            ;INITIALIZE COUNTER
+   e16a   ce e3 dc             LDX    #KEYTBL
+   e16d   a1 00         KEYDC3 CMPA   0,X      ;SEARCH TABLE
+   e16f   27 09                BEQ    KEYDC4
+   e171   8c e3 f4             CPX    #KEYTBL+24  ;END OF TABLE?
+   e174   27 61                BEQ    KEYD0F   ;NO KEY FOUND IN TABLE
+   e176   08                   INX
+   e177   5c                   INCB            ;ADVANCE
+   e178   20 f3                BRA    KEYDC3
+   e17a   8d b3         KEYDC4 BSR    KEYCL    ;WAIT FOR KEY RELEASE
+   e17c   26 fc                BNE    KEYDC4
+   e17e   bd e0 dd             JSR    DLY20    ;DELAY 20 MSEC
+   e181   c1 0f                CMPB   #$0F
+   e183   2e 27                BGT    KEYDC5
+   e185   fe a0 1a             LDX    XKEYBF   ;POINTER IN DISBUF
+   e188   e7 00                STAB   0,X      ;STORE KEY VALUE
+   e18a   8c a0 0f             CPX    #DISBUF+3  ;4 DIGITS IN?
+   e18d   26 09                BNE    KEYDC7   ;NO
+   e18f   7c a0 14             INC    DIGIN4   ;YES
+   e192   08            KEYDC6 INX
+   e193   ff a0 1a             STX    XKEYBF
+   e196   20 3f                BRA    KEYD0F
+   e198   8c a0 13      KEYDC7 CPX    #DISBUF+7  ;8 DIGITS IN?
+   e19b   26 f5                BNE    KEYDC6
+   e19d   7c a0 15             INC    DIGIN8   ;SET FLAG
+   e1a0   bd e2 7e             JSR    MDIS1    ;DISPLAY NEW DATA
+   e1a3   fe a0 1a             LDX    XKEYBF
+   e1a6   09                   DEX             ;BACK UP POINTER
+   e1a7   ff a0 1a             STX    XKEYBF   ;SAVE
+   e1aa   20 2b                BRA    KEYD0F
+                        *
+                        * HERE TO DISPATCH TO A KEYBOARD OPTION
+                        **
+                        *
+   e1ac   ce e1 96      KEYDC5 LDX    #JMPTAB-32
+   e1af   08            KYDC5  INX             ;GET TO ADDRESS IN JUMP TABLE
+   e1b0   08                   INX
+   e1b1   5a                   DECB 
+   e1b2   26 fb                BNE    KYDC5    ;THIS ONE?
+   e1b4   6e 00                JMP    0,X      ;YES
+   e1b6   20 0e         JMPTAB BRA    KEYDC8   ;P KEY
+   e1b8   20 14                BRA    KEYDC9   ;L KEY
+   e1ba   20 1e                BRA    KEYDCA   ;N KEY
+   e1bc   20 28                BRA    KEYDCB   ;V KEY
+   e1be   20 37                BRA    KEYDCC   ;M KEY
+   e1c0   20 41                BRA    KEYDCD   ;E KEY
+   e1c2   20 42                BRA    KEYDCE   ;R KEY
+   e1c4   20 48                BRA    KEYDCF   ;G KEY
+                        *
+                        * HERE ON P KEY
+                        *   PUNCH MEMORY TO AUDIO CASSETTE
+                        *
+   e1c6   bd e0 c4      KEYDC8 JSR    CLRDS    ;CLEAR DISPLAY
+   e1c9   bd e3 2f             JSR    PNCH     ;PUNCH DATA TO CASSETTE
+   e1cc   20 06                BRA    KEYDCH
+                        *
+                        * HERE ON L KEY
+                        *   LOAD MEMORY FROM AUDIO CASSETTE 
+                        *
+   e1ce   bd e0 c4      KEYDC9 JSR    CLRDS    ;CLEAR DISPLAY
+   e1d1   bd e3 95             JSR    LOAD     ;LOAD DATA FROM CASSETTE
+   e1d4   bd e0 d7      KEYDCH JSR    HDR      ;WRITE HEADER
+                        * RETURN TO DISPLAY HEADER
+   e1d7   7e e0 fe      KEYD0F JMP    OUTDS    ;DISPLAY HEADER
+                        *
+                        * HERE ON N KEY
+                        *   TRACE ONE INSTRUCTION
+                        *
+   e1da   7f a0 1d      KEYDCA CLR    VFLAG
+   e1dd   7c a0 18      TRACE  INC    NFLAG
+   e1e0   86 34                LDAA   #$34     ;SET UP HARDWARE TO TRACE
+   e1e2   b7 80 21             STAA   DISCTR   ;CA2 LOW START TRACE
+   e1e5   3b                   RTI
+                        *
+                        * HERE ON V KEY
+                        *   IF ADDRESS HAS 4 DIGITS INSERT A BRKPT
+                        *   AT ADDRESS OTHERWISE CLEAR ALL 5 BRKPTS
+                        *
+   e1e6   7d a0 14      KEYDCB TST    DIGIN4   ;4 DIGITS IN?
+   e1e9   26 05                BNE    *+7      ;YES, INSERT BP
+   e1eb   7f a0 1d             CLR    VFLAG
+   e1ee   20 e7                BRA    KEYD0F   ;GO DISPLAY
+   e1f0   8d 74                BSR    KEYD3F   ;YES, INSERT BREAKPOINT
+   e1f2   bd e0 6a             JSR    SETBR
+   e1f5   20 e0                BRA    KEYD0F
+                        *
+                        * HERE ON M KEY
+                        *   DISPLAY MEMORY CONTENTS
+                        *
+   e1f7   7c a0 16      KEYDCC INC    MFLAG    ;SET FLAG
+   e1fa   7d a0 14             TST    DIGIN4   ;4 DIGITS IN?
+   e1fd   27 d8                BEQ    KEYD0F   ;NO
+   e1ff   8d 68                BSR    MDIS     ;YES,DISPLAY MEMORY
+   e201   20 d4                BRA    KEYD0F
+                        *
+                        * HERE ON E KEY
+                        *   ESCAPE (ABORT) USER PGM
+                        *
+   e203   7e e0 ac      KEYDCD JMP    INIT     ;CLEAR DISPLAY AND FLAGS
+                        *
+                        * HERE ON R KEY
+                        *   DISPLAY USER REGISTERS
+                        *
+   e206   7c a0 17      KEYDCE INC    RFLAG    ;REGISTER DISPLAY
+   e209   bd e2 c6             JSR    REGST
+                        * MUTUAL RETURN TO DISPLAY
+   e20c   20 c9         KEYDCG BRA    KEYD0F
+                        *
+                        * HERE ON G KEY
+                        *   IF IN 'M' DISPLAY NEXT MEMORY LOCATION
+                        *   IF IN 'R' DISPLAY NEXT REGISTER
+                        *   IF 4 DIGIT ADDRESS WAS PUNCHED GO TO
+                        *      ADDRESS IN USER PROGRAM
+                        *   IF 4 DIGITS WEREN'T INPUT RETURN TO USERS
+                        *      PGM AT CURRENT USER PC (PROCEED)
+                        *
+   e20e   7d a0 16      KEYDCF TST    MFLAG    ;MEMORY MODE?
+   e211   26 48                BNE    KEYD1F   ;YES
+   e213   7d a0 17             TST    RFLAG
+   e216   26 49                BNE    KEYD2F
+                        * IS IT A 'GO' OR 'PROCEED'?
+   e218   7d a0 14             TST    DIGIN4   ;4 DIGITS IN?
+   e21b   26 07                BNE    KEYDCJ   ;NO, PROCEED MODE
+                        * HERE ON PROCEED
+   e21d   bd e0 63             JSR    GETXB    ;GET ADDR AND VFLAG
+   e220   27 2b                BEQ    TGC      ;BRANCH IF NO BREAKPOINTS
+   e222   20 b9                BRA    TRACE    ;GO TRACE
+                        * HERE ON GO MODE
+   e224   8d 40         KEYDCJ BSR    KEYD3F   ;GET ADDR
+   e226   30                   TSX
+   e227   a7 06                STAA   6,X      ;MODIFY LOW BYTE
+   e229   f6 a0 1e             LDAB   BPADR    ;GET LOW BYTE
+   e22c   e7 05                STAB   5,X      ;MODIFY HIGH BYTE
+   e22e   bd e0 c4             JSR    CLRDS    ;CLEAR DISPLAY
+   e231   bd e0 63             JSR    GETXB    ;GET TAB ADDR&VFLAG
+   e234   27 17                BEQ    TGC      ;BRANCH IF NO  BP
+                        ****INSTALL ALL BREAKPOINTS****
+   e236   ff a0 1e      TGB    STX    BPADR    ;SAVE IN TEMP
+   e239   ee 00                LDX    0,X      ;GET ADDR OF BP
+   e23b   a6 00                LDAA   0,X      ;GET OP-CODE     
+   e23d   36                   PSHA            ;SAVE
+   e23e   86 3f                LDAA   #$3F     ;INSTALL A SWI
+   e240   a7 00                STAA   0,X
+   e242   fe a0 1e             LDX    BPADR    ;GET BACK CURR TAB LOC
+   e245   32                   PULA            ;GET BACK OP-CODE
+   e246   a7 02                STAA   2,X      ;SAVE IT IN A TABLE
+   e248   bd e0 5e             JSR    ADD3X    ;GET NEXT TAB LOC
+   e24b   26 e9                BNE    TGB      ;MORE TO DO?
+                        * PREPARE TO RETURN TO USER
+   e24d   86 20         TGC    LDAA   #$20
+   e24f   b7 80 22             STAA   SCNREG   ;SETUP FOR KB INTR
+   e252   f6 80 22             LDAB   SCNREG   ;DUMMY READ TO CLEAR INTR
+   e255   86 3d                LDAA   #$3D
+   e257   b7 80 23             STAA   SCNCTR   ;ENABLE KB INTR
+   e25a   3b                   RTI             ;BACK TO USER
+                        * HERE TO DISPLAY NEXT ;MEM LOC
+   e25b   8d 47         KEYD1F BSR    MINC     ;MEMORY INCREMENT
+   e25d   8d 12                BSR    MDIS0    ;MEMORY DISPLAY
+   e25f   20 ab                BRA    KEYDCG
+                        * HERE ON DISPLAY NEXT REGISTER
+   e261   bd e2 d7      KEYD2F JSR    REGST1   ;REGISTER DISPLAY
+   e264   20 a6                BRA    KEYDCG
+   e266   7e e0 e4      KEYD3F JMP    BLDX
+                        **
+                        *
+                        **SUBROUTINE TO DISPLAY MEMORY AND CHANGE IT**
+                        *
+                        *
+   e269   fe a0 1a      MDIS   LDX    XKEYBF
+   e26c   08                   INX
+   e26d   08                   INX
+   e26e   ff a0 1a             STX    XKEYBF   ;UPDATE POINTER
+   e271   8d f3         MDIS0  BSR    KEYD3F   ;GET ADDR OF MEM LOCATION
+   e273   a6 00                LDAA   0,X      ;GET MEMORY DATA
+   e275   8d 23                BSR    MDIS2    ;FORMAT DATA
+   e277   b7 a0 10             STAA   DISBUF+4 ;STORE DATA IN DISBUF
+   e27a   f7 a0 11             STAB   DISBUF+5
+   e27d   39                   RTS
+                        *
+                        * SUB TO PUT NEW DATA IN MEMORY AND DISPLAY IT
+                        *
+   e27e   f6 a0 12      MDIS1  LDAB   DISBUF+6 ;GET NEW DATA
+   e281   58                   ASLB 
+   e282   58                   ASLB 
+   e283   58                   ASLB 
+   e284   58                   ASLB            ;DATA TO HIGH NIBBLE
+   e285   fa a0 13             ORAB   DISBUF+7 ;OR WITH LOW NIBBLE
+   e288   8d dc                BSR    KEYD3F   ;GET MEMORY ADDR AGAIN
+   e28a   e7 00                STAB   0,X      ;STORE NEW DATA
+   e28c   a6 00                LDAA   0,X      ;ACTUAL DATA IN MEMORY
+   e28e   8d 0a                BSR    MDIS2    ;FORMAT
+   e290   b7 a0 10             STAA   DISBUF+4 ;ACTUAL DATA TO DISPLAY
+   e293   f7 a0 11             STAB   DISBUF+5
+   e296   7f a0 15             CLR    DIGIN8   ;SETUP FOR NEW DATA ENTRY
+   e299   39                   RTS
+                        *
+                        **SUBROUTINE TO MOVE LOW NIBBLE OF A TO B AND TO
+                        ****MOVE HIGH NIBBLE OF A TO LOW NIBBLE OF A
+                        *
+   e29a   16            MDIS2  TAB
+   e29b   c4 0f                ANDB   #$0F     ;MASK LOW NIBBLE
+   e29d   84 f0                ANDA   #$F0     ;MASK HIGH NIBBLE
+   e29f   44                   LSRA 
+   e2a0   44                   LSRA 
+   e2a1   44                   LSRA 
+   e2a2   44                   LSRA            ;HIGN NIBBLE TO LOW NIBBLE
+   e2a3   39                   RTS
+                        *
+                        * SUBROUTINE TO INC MEMORY DISPLAY AND CHG?
+                        *
+   e2a4   8d c0         MINC   BSR    KEYD3F   ;GET MEMORY ADDRESS
+   e2a6   08                   INX             ;SETUP FOR NEXT MEMORY LOC
+   e2a7   ff a0 0a             STX    TEMP1    ;SAVE
+   e2aa   b6 a0 0a             LDAA   TEMP1    ;GET HIGH BYTE
+   e2ad   8d eb                BSR    MDIS2    ;FORMAT FOR DISBUF
+   e2af   ce a0 0c             LDX    #DISBUF
+   e2b2   a7 00                STAA   0,X
+   e2b4   e7 01                STAB   1,X      ;PUT IN DISPLAY BUFFER
+   e2b6   b6 a0 0b             LDAA   TEMP1+1  ;GET LOW BYTE
+   e2b9   8d df                BSR    MDIS2    ;FORMAT
+   e2bb   a7 02                STAA   2,X
+   e2bd   e7 03                STAB   3,X
+   e2bf   7c a0 14             INC    DIGIN4   ;FOUR DIGITS ENTERED
+   e2c2   7c a0 16             INC    MFLAG    ;SETUP FOR MEMORY EXAMINE
+   e2c5   39                   RTS
+                        *
+                        *
+                        **SUBROUTINE TO DISPLAY REGISTERS ON USERS STACK
+                        *
+                        * ORDER OF DISPLAY IS: PC,X,A,B,CC,SP
+                        *   TEMP2 STARTS AT -2 AND ADVANCES TO +3 AND
+                        *   CORRESPONDS TO THE ORDER OF DISPLAY
+                        *
+   e2c6   86 fe         REGST  LDAA   #$FE     ;INITIALIZE COUNTER
+   e2c8   b7 a0 19             STAA   TEMP2
+   e2cb   fe a0 08             LDX    SP       ;GET USER'S SP
+   e2ce   86 06                LDAA   #$6
+   e2d0   08            REGST0 INX             ;POINT TO TOP OF STACK
+   e2d1   4a                   DECA 
+   e2d2   26 fc                BNE    REGST0
+   e2d4   ff a0 0a             STX    TEMP1    ;TEMP X LOCATION
+   e2d7   bd e0 c4      REGST1 JSR    CLRDS    ;CLEAR DISPLAY
+   e2da   fe a0 0a             LDX    TEMP1    ;RESTORE X
+   e2dd   b6 a0 19             LDAA   TEMP2
+   e2e0   2b 0e                BMI    REGST2   ;PC AND X REGS
+   e2e2   81 03                CMPA   #$3      ;IS IT SP?
+   e2e4   27 21                BEQ    REGST3   ;YES
+   e2e6   81 04                CMPA   #$4      ;ALL REGS OUT START OVER
+   e2e8   27 dc                BEQ    REGST
+   e2ea   a6 00                LDAA   0,X      ;OUTPUT A,B,CC
+   e2ec   8d 2e                BSR    REGST5   ;DISPLAY ONE BYTE
+   e2ee   20 21                BRA    REGST4   ;UPDATE COUNTER
+   e2f0   36            REGST2 PSHA            ;SAVE A
+   e2f1   a6 00                LDAA   0,X      ;GET HIGH BYTE
+   e2f3   8d 27                BSR    REGST5   ;DISPLAY
+   e2f5   fe a0 0a             LDX    TEMP1
+   e2f8   a6 01                LDAA   1,X      ;GET LOW BYTE
+   e2fa   8d 2b                BSR    REGST6   ;DISPLAY
+   e2fc   32                   PULA            ;RESTORE A
+   e2fd   4c                   INCA            ;X REG? (A=0)
+   e2fe   27 11                BEQ    REGST4   ;YES
+   e300   8d 12                BSR    REGST8   ;DEC POINTER
+   e302   bd e2 71             JSR    MDIS0
+   e305   20 0a                BRA    REGST4   ;UPDATE COUNTER
+   e307   b6 a0 08      REGST3 LDAA   SP       ;SP TO DISPLAY
+   e30a   8d 10                BSR    REGST5   ;DISPLAY
+   e30c   b6 a0 09             LDAA   SP+1
+   e30f   8d 16                BSR    REGST6
+   e311   7c a0 19      REGST4 INC    TEMP2    ;UPDATE COUNTER
+   e314   fe a0 0a      REGST8 LDX    TEMP1    ;INCREMENT X
+   e317   09                   DEX
+   e318   ff a0 0a             STX    TEMP1    ;SAVE X
+   e31b   39                   RTS
+                        *
+                        *SUBROUTINE TO MOVE TWO DIGITS IN A TO FIRST TWO
+                        ****LOCATIONS IN THE DISPLAY BUFFER (DISBUF)
+                        *
+   e31c   bd e2 9a      REGST5 JSR    MDIS2    ;FORMAT
+   e31f   ce a0 0c             LDX    #DISBUF
+   e322   a7 00         REGST7 STAA   0,X      ;FIRST DIGIT(OR THIRD)
+   e324   e7 01                STAB   1,X      ;SECOND DIGHT
+   e326   39                   RTS
+                        *
+                        **SUBROUTINE TO MOVE TWO DIGITS IN A TO SECOND TWO L
+                        ****LOCATIONS IN THE DISPLAY BUFFER (DISBUF)
+                        *
+   e327   bd e2 9a      REGST6 JSR    MDIS2    ;FORMAT
+   e32a   ce a0 0e             LDX    #DISBUF+2  ;THIRD & FOURTH DIGITS
+   e32d   20 f3                BRA    REGST7
+                        *
+                        *
+                        ****SUBROUTINE TO PUNCH DATA TO CASSETTE TAPE****
+                        * AUDIO CASSETTE WITH KC STANDARD
+                        *
+   e32f   86 51         PNCH   LDAA   #%01010001  ;8 BIT CHR PAR 2 STOP
+   e331   b7 80 08             STAA   ACIAS    ;DIVIDE BY 16 WITH RTS NOT HIG
+   e334   ce 03 ff             LDX    #$03FF
+   e337   8d 54                BSR    PNLDR    ;PUNCH LEADER
+   e339   f6 a0 05      PUND10 LDAB   ENDA+1   ;FORM END TEMP REG
+   e33c   f0 a0 03             SUBB   BEGA+1
+   e33f   b6 a0 04             LDAA   ENDA
+   e342   b2 a0 02             SBCA   BEGA
+   e345   27 02                BEQ    PUND25   ;DIFF LESS THAN 255
+   e347   c6 ff                LDAB   #$FF     ;YES, SET BLOCK=256
+   e349   86 42         PUND25 LDAA   #'B'      ;PUNCH B
+   e34b   8d 2d                BSR    OUTCH
+   e34d   37                   PSHB 
+   e34e   30                   TSX
+   e34f   8d 36                BSR    PUN
+   e351   32                   PULA            ;GET BYTE COUNT
+   e352   4c                   INCA            ;ADJUST IT
+   e353   b7 a0 19             STAA   TEMP2
+   e356   ce a0 02             LDX    #BEGA    ;PUNCH ADDR
+   e359   8d 2c                BSR    PUN
+   e35b   8d 2a                BSR    PUN
+   e35d   fe a0 02             LDX    BEGA     ;PUNCH DATA
+   e360   8d 25         PUND30 BSR    PUN
+   e362   7a a0 19             DEC    TEMP2    ;DONE YET?
+   e365   26 f9                BNE    PUND30   ;NO
+   e367   ff a0 02             STX    BEGA     ;SAVE XR VALUE
+   e36a   ce 00 19             LDX    #$0019
+   e36d   8d 1e                BSR    PNLDR    ;PUNCH 25 ONES
+   e36f   fe a0 02             LDX    BEGA     ;RESTORE XR
+   e372   09                   DEX
+   e373   bc a0 04             CPX    ENDA
+   e376   26 c1                BNE    PUND10   ;NO
+   e378   86 47                LDAA   #'G'      ;PUNCH G
+                        *
+                        ***SUBROUTINE TO PUNCH DATA BYTE****
+                        *
+   e37a   37            OUTCH  PSHB            ;SAVE B
+   e37b   f6 80 08      OUTC1  LDAB   ACIAS    ;IS DATA READY YET?
+   e37e   57                   ASRB 
+   e37f   57                   ASRB 
+   e380   24 f9                BCC    OUTC1    ;XMIT NOT READY YET
+   e382   b7 80 09             STAA   ACIAD    ;OUTPUT ONE CHAR
+   e385   33                   PULB            ;RESTORE B
+   e386   39                   RTS
+                        *
+                        * SUB TO PUNCH ONE BYTE PTED TO BY XREG.
+                        * ALSO INCREMENTS XREG BEFORE RETURN
+                        *
+   e387   a6 00         PUN    LDAA   0,X      ;GET DATA
+   e389   8d ef                BSR    OUTCH    ;PUNCH IT
+   e38b   08                   INX             ;UPDATE ADDR
+   e38c   39                   RTS
+                        *
+                        ***PUNCH LEADER***
+                        *
+   e38d   86 ff         PNLDR  LDAA   #$FF     ;OUTPUT ALL ONES
+   e38f   8d e9                BSR    OUTCH    ;OUTPUT
+   e391   09                   DEX             ;DECREMENT COUNTER
+   e392   26 f9                BNE    PNLDR    ;IF NOT DONE THEN LOOP
+   e394   39                   RTS
+                        *
+                        *
+                        ******SUBROUTINE TO LOAD DATA FROM CASSETTE TAPE****
+                        *
+                        *
+   e395   86 10         LOAD   LDAA   #%00010000  ;DIVIDE BY ONE
+   e397   b7 80 08             STAA   ACIAS
+   e39a   8d 24         BILD   BSR    INCHR
+   e39c   81 42                CMPA   #'B'      ;START OF BINARY?
+   e39e   27 05                BEQ    RDBLCK   ;YES
+   e3a0   81 47                CMPA   #'G'      ;END OF FILE?
+   e3a2   26 f6                BNE    BILD
+   e3a4   39                   RTS             ;YES
+   e3a5   8d 19         RDBLCK BSR    INCHR    ;GET BYTE COUNT
+   e3a7   16                   TAB             ;PUT IN B
+   e3a8   5c                   INCB            ;ADJUST IT
+   e3a9   8d 15                BSR    INCHR    ;GET START ADDR HI
+   e3ab   b7 a0 02             STAA   BEGA
+   e3ae   8d 10                BSR    INCHR    ;GET START ADDR LO
+   e3b0   b7 a0 03             STAA   BEGA+1
+   e3b3   fe a0 02             LDX    BEGA     ;ADDR TO X REG
+   e3b6   8d 08         STBLCK BSR    INCHR    ;NOT DONE
+   e3b8   a7 00                STAA   0,X      ;STRE IT
+   e3ba   08                   INX             ;INCA ADDR
+   e3bb   5a                   DECB            ;DECB BYTE COUNT
+   e3bc   26 f8                BNE    STBLCK   ;NOT DONE
+   e3be   20 da                BRA    BILD
+                        *
+                        *****INPUT ONE CHR TO A REG******
+                        *
+   e3c0   b6 80 08      INCHR  LDAA   ACIAS
+   e3c3   47                   ASRA 
+   e3c4   24 fa                BCC    INCHR    ;DATA READY?
+   e3c6   b6 80 09             LDAA   ACIAD    ;INPUT CHAR
+   e3c9   39                   RTS
+                        *
+                        *****SEVEN SEGMENT PATTERNS - USED BY OUTDS****
+                        *               0   1   2   3   4   5   6   7
+   e3ca   40 79 24 30   DIGTBL FCB    $40,$79,$24,$30,$19,$12,$02,$78
+   e3ce   19 12 02 78   
+                        *               8   9   A   B   C   D   E   F
+   e3d2   00 18 08 03          FCB    $00,$18,$08,$03,$46,$21,$06,$0E
+   e3d6   46 21 06 0e   
+                        *               -   BLANK
+   e3da   bf 7f                FCB    $BF,$7F
+                        ****KEY VALUE LOOKUP TABLE - USED BY KEYDC
+                        *               0   1   2   3   4   5   6   7
+   e3dc   01 02 42 82   KEYTBL FCB    $01,$02,$42,$82,$04,$44,$84,$08
+   e3e0   04 44 84 08   
+                        *               8   9   A   B   C   D   E   F
+   e3e4   48 88 c8 c4          FCB    $48,$88,$C8,$C4,$C2,$C1,$81,$41
+   e3e8   c2 c1 81 41   
+                        *               P   L   N   V   M   E   R   G
+   e3ec   10 50 90 d0          FCB    $10,$50,$90,$D0,$20,$60,$A0,$E0
+   e3f0   20 60 a0 e0   
+                        *
+                        ******KEYBOARD/DISPLAY REGISTER ASSIGNMENT
+                        *
+   8020                 DISREG EQU    $8020    ;DISPLAY SEGMENTS REGISTER
+   8021                 DISCTR EQU    $8021    ;DISPLAY SEGMENTS CONTROL
+   8022                 SCNREG EQU    $8022    ;KEYBOARD/DISPLAY SCAN REG
+   8023                 SCNCTR EQU    $8023    ;KEYBOARD/DISPLAY SCAN CTR
+   8008                 ACIAS  EQU    $8008    ;ACIA CTRL OR STATUS REG
+   8009                 ACIAD  EQU    $8009    ;ACIA XMIT OR RCV REGS
+                        *
+                        ****INTERRUPT VECTORS
+                        *      ORG    $E3F8
+   e3f4   00 00 00 00          FCB    $00,$00,$00,$00   ;ADDED 2019-08-24 TO INSURE E3F4,5,6,7 = 00 IN .S19 FILE
+   e3f8   e0 14                FDB    IO       ;IRQ INTERRUPT VECTOR
+   e3fa   e0 32                FDB    SWIR     ;SOFTWARE INTERRUPT VECTOR
+   e3fc   e0 19                FDB    NONMSK   ;NMI INTERRUPT VECTOR
+   e3fe   e0 8d                FDB    RESTAR   ;RESTART INTERRUPT VECTOR     
+                               PAGE
+                        *
+                        ******VARIABLE PARAMETERS******
+                        *   SYSTEM RAM
+                        *
+                        *
+                        * CAUTION: IF THE USER MODIFY'S THIS PROGRAM
+                        * (GENERATES HIS OWN PROM) THE ORDER OF SOME
+                        * OF THE FOLLOWING VARIABLES IS CRITICAL FOR
+                        * CORRECT OPERATION
+                        *
+   a000                        ORG    $A000
+                        * THE USER CAN STORE THE ADDRES OF HIS IRQ
+                        * ROUTINE HERE.
+   a000                 IOV    RMB    2        ;IRQ INTERRUPT POINTER
+   a002                 BEGA   RMB    2        ;PUNCH BEGINNING ADDRESS
+   a004                 ENDA   RMB    2        ;PUNCH ENDING ADDRESS
+   a006                 NIO    RMB    2        ;NMI INTERRUPT POINTER
+   a008                 SP     RMB    2        ;TEMP STACK POINTER
+   a00a                 TEMP1  RMB    2        ;SCRATCH
+   a00c                 DISBUF RMB    8        ;DISPLAY BUFFER
+   a014                 DIGIN4 RMB    1        ;4 DIGITS ENTERED FLAG
+   a015                 DIGIN8 RMB    1        ;8 DIGITS ENTERED FLAG
+   a016                 MFLAG  RMB    1        ;MEMORY CHANGE MODE FLAG
+   a017                 RFLAG  RMB    1        ;REGISTER DISPLAY MODE FLAG
+   a018                 NFLAG  RMB    1        ;TRACE MODE FLAG
+   a019                 TEMP2  RMB    1        ;COUNTER IN REG DISPLAY, AUDIO
+   a01a                 XKEYBF RMB    2        ;NEXT LOC IN DISPLAY BUFFER
+   a01c                 SCNCNT RMB    1        ;KEYBOARD /DISPLAY SCAN COUNTE
+   a01d                 VFLAG  RMB    1        ;CONTAINS THE NBR OF ACTIVE BR
+   a01e                 BPADR  RMB    2        ;TEMP ADDR OF BP&XREG TEMP
+   a020                 XDSBUF RMB    2        ;XREG TEMP LOCATION
+                        *
+                        * BREAKPOINT AND OPCODE TABLE
+                        *   EACH BRKPT REQUIRES 3 BYTES,
+                        *   BYTES 1,2 ARE THE ADDRESS OF THE BRKPT
+                        *   BYTE 3 IS THE REPLACED OP CODE
+                        *   CHECK VFLAG TO SEE HOW MANY OF THE BRKPTS
+                        *   ARE VALID
+                        *
+   a022                 BPTAB  RMB    15       ;BREAKPOINT & OP CODE TABLE
+   a031                        END
+8009  ACIAD         8008  ACIAS         e05e  ADD3X         a002  BEGA      
+e39a  BILD          e0e4  BLDX          a01e  BPADR         a022  BPTAB     
+e0b2  CLFLG         e0b6  CLFLG1        e0c4  CLRDS         e0ce  CLRDS1    
+a014  DIGIN4        a015  DIGIN8        e3ca  DIGTBL        a00c  DISBUF    
+8021  DISCTR        e084  DISNMI        8020  DISREG        e0e0  DLY1      
+e0dd  DLY20         a004  ENDA          e054  GENA          e063  GETXB     
+e0d7  HDR           e3c0  INCHR         e0ac  INIT          e014  IO        
+a000  IOV           e1b6  JMPTAB        e12f  KEYCL         e13a  KEYCL1    
+e148  KEYCL2        e1d7  KEYD0F        e25b  KEYD1F        e261  KEYD2F    
+e266  KEYD3F        e14e  KEYDC         e15b  KEYDC1        e169  KEYDC2    
+e16d  KEYDC3        e17a  KEYDC4        e1ac  KEYDC5        e192  KEYDC6    
+e198  KEYDC7        e1c6  KEYDC8        e1ce  KEYDC9        e1da  KEYDCA    
+e1e6  KEYDCB        e1f7  KEYDCC        e203  KEYDCD        e206  KEYDCE    
+e20e  KEYDCF        e20c  KEYDCG        e1d4  KEYDCH        e224  KEYDCJ    
+e3dc  KEYTBL        e1af  KYDC5         e395  LOAD          e269  MDIS      
+e271  MDIS0         e27e  MDIS1         e29a  MDIS2         a016  MFLAG     
+e2a4  MINC          a018  NFLAG         a006  NIO           e02d  NONMK1    
+e019  NONMSK        e37b  OUTC1         e37a  OUTCH         e0fe  OUTDS     
+e101  OUTDS1        e10b  OUTDS2        e149  OUTDS3        e32f  PNCH      
+e38d  PNLDR         e387  PUN           e339  PUND10        e349  PUND25    
+e360  PUND30        e3a5  RDBLCK        e2c6  REGST         e2d0  REGST0    
+e2d7  REGST1        e2f0  REGST2        e307  REGST3        e311  REGST4    
+e31c  REGST5        e327  REGST6        e322  REGST7        e314  REGST8    
+e08d  RESTAR        a017  RFLAG         a01c  SCNCNT        8023  SCNCTR    
+8022  SCNREG        e06a  SETBR         a008  SP            e3b6  STBLCK    
+e032  SWIR          e058  TDISP         a00a  TEMP1         a019  TEMP2     
+e236  TGB           e24d  TGC           e023  TNM1          e072  TPIG      
+e1dd  TRACE         e044  TZONK         e076  TZOT          a01d  VFLAG     
+a020  XDSBUF        a01a  XKEYBF        
+
